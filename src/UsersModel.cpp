@@ -14,13 +14,9 @@
 UsersModel::UsersModel(const std::string &roomId, QObject *parent)
   : QAbstractListModel(parent)
   , room_id(roomId)
-{
-    roomMembers_ = cache::roomMembers(roomId);
-    for (const auto &m : roomMembers_) {
-        displayNames.push_back(QString::fromStdString(cache::displayName(room_id, m)));
-        userids.push_back(QString::fromStdString(m));
-    }
-}
+  , roomMembers_(cache::roomMembers(roomId))
+  , memberInfos_(cache::getMembers(roomId, 0, std::numeric_limits<std::size_t>::max()))
+{}
 
 QHash<int, QByteArray>
 UsersModel::roleNames() const
@@ -43,25 +39,25 @@ UsersModel::data(const QModelIndex &index, int role) const
         case CompletionModel::CompletionRole:
             if (UserSettings::instance()->markdown())
                 return QStringLiteral("[%1](https://matrix.to/#/%2)")
-                  .arg(QString(displayNames[index.row()])
+                  .arg(QString(memberInfos_[index.row()].display_name)
                          .replace("[", "\\[")
                          .replace("]", "\\]")
                          .toHtmlEscaped(),
-                       QString(QUrl::toPercentEncoding(userids[index.row()])));
+                       QString(QUrl::toPercentEncoding(memberInfos_[index.row()].user_id)));
             else
-                return displayNames[index.row()];
+                return memberInfos_[index.row()].display_name;
         case CompletionModel::SearchRole:
-            return displayNames[index.row()];
+            return memberInfos_[index.row()].display_name;
         case Qt::DisplayRole:
         case Roles::DisplayName:
-            return displayNames[index.row()].toHtmlEscaped();
+            return memberInfos_[index.row()].display_name.toHtmlEscaped();
         case CompletionModel::SearchRole2:
-            return userids[index.row()];
+            return memberInfos_[index.row()].user_id;
         case Roles::AvatarUrl:
             return cache::avatarUrl(QString::fromStdString(room_id),
                                     QString::fromStdString(roomMembers_[index.row()]));
         case Roles::UserID:
-            return userids[index.row()].toHtmlEscaped();
+            return memberInfos_[index.row()].user_id.toHtmlEscaped();
         }
     }
     return {};
