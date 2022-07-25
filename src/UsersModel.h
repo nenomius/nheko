@@ -7,6 +7,8 @@
 
 #include <QAbstractListModel>
 
+#include "CacheStructs.h"
+
 class UsersModel : public QAbstractListModel
 {
 public:
@@ -22,13 +24,11 @@ public:
     int rowCount(const QModelIndex &parent = QModelIndex()) const override
     {
         (void)parent;
-        return (int)roomMembers_.size();
+        return (int)memberInfos_.size();
     }
     QVariant data(const QModelIndex &index, int role) const override;
 
 private:
-    std::string room_id;
-    std::vector<std::string> roomMembers_;
-    std::vector<QString> displayNames;
-    std::vector<QString> userids;
+    QString room_id;
+    std::vector<RoomMember> memberInfos_;
 };
