@@ -43,10 +43,10 @@ signals:
     void newSearchString(QString);
 
 private:
-    class trie;
+    struct Index;
 
     QString searchString_;
-    QScopedPointer<trie> trie_;
+    QScopedPointer<Index> index_;
     std::vector<uint> mapping;
     int maxMistakes_;
     size_t max_completions_;
