@@ -77,34 +77,12 @@ struct CompletionProxyModel::Index
         item_starts.push_back(text.size());
 
         std::iota(SA.begin(), SA.end(), 0);
-//         std::erase_if(SA, [this](int p){
-//             // exclude prefixes that start at null byte or trail UTF-8 byte
-//             return text[p] == u8'\0' or (text[p] >> 6) == 0x2;
-//         });
         sort_prefixes(SA, 0);
 
-//         constexpr auto placeholder = -1;
         invSA.resize(text.size());
-//         std::ranges::fill(invSA, placeholder);
         for (int i = 0, I = SA.size(); i < I; ++i) {
             invSA[SA[i]] = i;
         }
-
-        // pruning SA from unwanted prefixes creates holes in inverse SA,
-        // fill those with pointers to nearest from left prefix starting position
-//         int last_prefix = text.size();
-//         for (auto &x: invSA) {
-//             if (x == placeholder) {
-//                 x = last_prefix;
-//             } else {
-//                 last_prefix = x;
-//             }
-//         }
-
-//         id.resize(SA.size());
-//         for (int i = 0, I = SA.size(); i < I; ++i) {
-//             id[i] = std::ranges::lower_bound(item_borders, SA[i]) - item_borders.begin();
-//         }
     }
 
     [[nodiscard]] int item_at(int text_pos) const noexcept
@@ -198,12 +176,12 @@ struct CompletionProxyModel::Index
             }
 
             // FIXME account to UTF-8 multibyteness on edits
-            for (auto j = i; j < pattern.size(); ++j) {
+            // TODO adjacent character swaps
+            for (auto j = i; j < pattern.size(); ++j, p = extend_prefix(p, pattern[j])) {
 //                 nhlog::ui()->debug("index:     j:{} p:{}", j, to_string(p));
 
                 // deletion at j
                 if (j + 1 < pattern.size()) {
-//                     nhlog::ui()->debug("index:     delete");
                     kapproximate(kapproximate, p, j + 1, distance + 1);
                 }
 
@@ -214,21 +192,14 @@ struct CompletionProxyModel::Index
                         continue;
                     }
 
-                    auto p_ = extend_prefix(p, c);
-
                     // replacemen at j
                     if (j + 1 < pattern.size()) {
-//                         nhlog::ui()->debug("index:     replace");
-                        kapproximate(kapproximate, p_, j + 1, distance + 1);
+                        kapproximate(kapproximate, s, j + 1, distance + 1);
                     }
 
                     // insertion at j
-//                     nhlog::ui()->debug("index:     insert");
-                    kapproximate(kapproximate, p_, j, distance + 1);
+                    kapproximate(kapproximate, s, j, distance + 1);
                 }
-
-                // no edits at j
-                p = extend_prefix(p, pattern[j]);
             }
         };
 
@@ -246,11 +217,8 @@ struct CompletionProxyModel::Index
         nhlog::ui()->debug("index: top_items(pattern='{}', max_distance={}, max_items={})", std::string_view(reinterpret_cast<const char*>(pattern.data()), pattern.size()), max_distance, max_items);
         const auto t0     = std::chrono::steady_clock::now();
 
-        // FIXME limit max distance on short strings, something like: [0..2]->0, [3..5]->1, [6..]->2
-        const auto results = search(pattern , max_distance);
-//         const auto results = search(pattern , 0);
-        max_items = std::min(item_starts.size(), max_items);
-//         nhlog::ui()->debug("index:     result_ranges: {}", results.size());
+        const auto found_ranges = search(pattern , max_distance);
+
         const auto t1     = std::chrono::steady_clock::now();
 
         std::vector<uint8_t> weights;
@@ -258,13 +226,15 @@ struct CompletionProxyModel::Index
 
         // TODO rank something like this?
         // exact match to full text
-        // exact match to partial text
+        // exact match to partial text TODO need word boundaries
         // exact prefix match of full text
-        // exact prefix match of partial text
+        // exact prefix match of partial text TODO need word boundaries
         // then by increasing edit_distance
 
+        std::vector<int> items;
+
 //         nhlog::ui()->debug("index: CANDIDATES ranges:{}:", results.size());
-        for (auto r: results) {
+        for (auto r: found_ranges) {
 //             nhlog::ui()->debug("index:   RANGE {} ~{}", to_string(r.range), r.distance);
             for (auto prefix_id: r.range) {
                 const auto match_pos = SA[prefix_id];
@@ -306,6 +276,10 @@ struct CompletionProxyModel::Index
 //                     item_text.substr(0, match_start_pos), item_text.substr(match_start_pos, length), item_text.substr(match_end_pos)
 //                 );
 
+                if (weights[item] == 0) {
+                    // found this item first time, add to item list
+                    items.push_back(item);
+                }
                 weights[item] = std::max(weights[item], weight);
             }
         }
@@ -314,13 +288,11 @@ struct CompletionProxyModel::Index
 
         auto item_weight = [&](int i){return weights[i];};
 
-        std::vector<int> items;
-        items.resize(weights.size());
-        std::iota(items.begin(), items.end(), 0);
-
         // get best max_items results
-        std::ranges::nth_element(items, items.begin() + max_items, std::greater{}, item_weight);
-        items.resize(max_items);
+        if (items.size() > max_items) {
+            std::ranges::nth_element(items, items.begin() + max_items, std::greater{}, item_weight);
+            items.resize(max_items);
+        }
 
         const auto t3     = std::chrono::steady_clock::now();
 
@@ -366,12 +338,11 @@ struct CompletionProxyModel::Index
 //             if (size <= 128) { // 135 ms
             if (prefixes.size() <= 64) { // 132 ms
 //             if (size <= 32) { // 142 ms
-                std::ranges::sort(prefixes, [txt](int l, int r){return txt.substr(l) < txt.substr(r);});
+                std::ranges::sort(prefixes, [txt, k](int l, int r){return txt.substr(l + k) < txt.substr(r + k);});
                 return;
             }
 
-            uint32_t count[256];
-            std::ranges::fill(count, 0);
+            uint32_t count[256] = {};
             std::ranges::for_each(prefixes, [&](int x){count[txt[x + k]] += 1;});
             const char8_t most_common_char = std::max_element(count + 1, std::end(count)) - count;
 
@@ -438,31 +409,29 @@ CompletionProxyModel::CompletionProxyModel(QAbstractItemModel *model,
     nhlog::ui()->debug("CompletionProxyModel: =================================================================");
 
     std::u8string full_text;
-    std::vector<int> items;
+    std::vector<int> item_starts;
     {
         const auto start_at = std::chrono::steady_clock::now();
 
         const auto row_count = sourceModel()->rowCount();
 
-        items.reserve(row_count);
+        item_starts.reserve(row_count);
 
         for (int i = 0; i < row_count; i++) {
             auto string1 = sourceModel()
                             ->data(sourceModel()->index(i, 0), CompletionModel::SearchRole)
                             .toString()
                             .toLower()
-//                             .trimmed()
                             .toUtf8();
 
             auto string2 = sourceModel()
                             ->data(sourceModel()->index(i, 0), CompletionModel::SearchRole2)
                             .toString()
                             .toLower()
-//                             .trimmed()
                             .toUtf8();
 
             // FIXME ACHTUNG UB replace by memcpy
-            items.push_back(full_text.size());
+            item_starts.push_back(full_text.size());
             full_text.append(reinterpret_cast<const char8_t*>(string1.constData()), string1.size());
             full_text.push_back('\0');
             full_text.append(reinterpret_cast<const char8_t*>(string2.constData()), string2.size());
@@ -471,65 +440,17 @@ CompletionProxyModel::CompletionProxyModel(QAbstractItemModel *model,
 
         const auto concat_at     = std::chrono::steady_clock::now();
 
-        index_.reset(new Index(std::move(full_text), std::move(items)));
+        index_.reset(new Index(std::move(full_text), std::move(item_starts)));
 
         const auto build_at     = std::chrono::steady_clock::now();
 
         using fmilli = std::chrono::duration<double, std::milli>;
         nhlog::ui()->debug("CompletionProxyModel: concat full text: {} ms", fmilli(concat_at - start_at).count());
         nhlog::ui()->debug("CompletionProxyModel: build SA: {} ms", fmilli(build_at - concat_at).count());
-        nhlog::ui()->debug("CompletionProxyModel: total SA: {} ms", fmilli(build_at - start_at).count());
+        nhlog::ui()->debug("CompletionProxyModel: total: {} ms", fmilli(build_at - start_at).count());
         nhlog::ui()->debug("CompletionProxyModel: item count: {}", index_->item_starts.size() - 1);
         nhlog::ui()->debug("CompletionProxyModel: full_text size: {}", index_->text.size());
-        nhlog::ui()->debug("CompletionProxyModel: item_starts sorted: {}", std::ranges::is_sorted(index_->item_starts));
-
-        {
-            using namespace std::literals;
-
-//             nhlog::ui()->debug("CompletionProxyModel: WAT 'je' {}", to_string(index_->range_of(u8"je")));
-//             nhlog::ui()->debug("CompletionProxyModel: WAT 'ss' {}", to_string(index_->range_of(u8"ss")));
-//             nhlog::ui()->debug("CompletionProxyModel: WAT 'je'+'ss' {}", to_string(index_->concat_prefix(index_->range_of(u8"je"), index_->range_of(u8"ss"))));
-//             nhlog::ui()->debug("CompletionProxyModel: WAT 'jess' {}", to_string(index_->range_of(u8"jess")));
-// 
-//             nhlog::ui()->debug("CompletionProxyModel: WAT 'gr' {}", to_string(index_->range_of(u8"gr")));
-//             nhlog::ui()->debug("CompletionProxyModel: WAT 'in' {}", to_string(index_->range_of(u8"in")));
-//             nhlog::ui()->debug("CompletionProxyModel: WAT 'gr'+'in' {}", to_string(index_->concat_prefix(index_->range_of(u8"gr"), index_->range_of(u8"in"))));
-//             nhlog::ui()->debug("CompletionProxyModel: WAT 'grin' {}", to_string(index_->range_of(u8"grin")));
-// 
-//             auto search = u8"jess";
-//             auto p = index_->range_of(search);
-//             for (auto i: p) {
-//                 const auto pos = index_->SA[i];
-//                 const auto d = std::ranges::lower_bound(items, pos) - items.begin();
-//                 nhlog::ui()->debug("CompletionProxyModel: WAT {} p:{} d:{} '{}'", i, pos, d, std::string_view(reinterpret_cast<const char*>(index_->text.data() + pos)));
-//             }
-// 
-//             nhlog::ui()->debug("CompletionProxyModel: WAT subranges of '{}':", std::string_view(reinterpret_cast<const char*>(search)));
-//             for (auto [s, c] = index_->first_subrange(p); s.lo != p.hi; std::tie(s, c) = index_->next_subrange(p, s)) {
-//                 nhlog::ui()->debug("CompletionProxyModel: WAT     '{}' {}", char(c), to_string(s));
-//             }
-
-//             nhlog::ui()->debug("CompletionProxyModel: WAT SEARCH START");
-// 
-//             auto text = std::string_view(reinterpret_cast<const char*>(index_->text.data()), index_->text.size());
-// 
-//             auto res = index_->search(u8"jess", 0);
-//             for (auto r: res) {
-//                 nhlog::ui()->debug("CompletionProxyModel: RESULT RANGE {} dist:{}", to_string(r.range), r.distance);
-//                 for (auto prefix_id: r.range) {
-//                     const auto pos = index_->SA[prefix_id];
-//                     const auto item = index_->item_at(pos);
-//                     const auto item_start_pos = index_->item_starts[item];
-//                     const auto item_length = index_->item_starts[item + 1] - item_start_pos;
-//                     const auto item_text = text.substr(item_start_pos, item_length);
-//                     nhlog::ui()->debug("CompletionProxyModel:     {} p:{} i:{}[{}..{}] '{}' '{}'", prefix_id, pos, item, item_start_pos, item_start_pos + item_length, item_text, std::string_view(text.data() + pos));
-//                 }
-//             }
-
-//             std::exit(0);
-        }
     }
-    nhlog::ui()->flush();
 
     // initialize default mapping
     mapping.resize(std::min(max_completions_, static_cast<size_t>(model->rowCount())));
