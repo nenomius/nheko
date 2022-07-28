@@ -47,7 +47,8 @@ private:
 
     QString searchString_;
     QScopedPointer<Index> index_;
-    std::vector<uint> mapping;
+    std::vector<int> mapping;
     int maxMistakes_;
     size_t max_completions_;
 };
+
