@@ -77,18 +77,10 @@ struct CompletionProxyModel::Index
     std::vector<int> invSA;
     std::vector<int> item_starts;
 
-    struct prefix_range
+    struct index_range
     {
         std::size_t lo = 0;
         std::size_t hi = 0;
-        int m = 0;
-
-        std::u8string prefix;
-
-        friend auto to_string(prefix_range p)
-        {
-            return fmt::format("{}:[{}..{})", p.m, p.lo, p.hi);
-        };
 
         struct iterator
         {
@@ -120,6 +112,18 @@ struct CompletionProxyModel::Index
         [[nodiscard]] auto begin() const noexcept {return iterator{lo};}
         [[nodiscard]] auto end() const noexcept {return iterator{hi};}
         [[nodiscard]] bool empty() const {return lo == hi;}
+    };
+
+    struct prefix_range: index_range
+    {
+        int m = 0;
+
+        std::u8string prefix;
+
+        friend auto to_string(prefix_range p)
+        {
+            return fmt::format("{}:[{}..{})", p.m, p.lo, p.hi);
+        };
     };
 
     Index(std::u8string &&text_, std::vector<int> &&item_starts_)
@@ -154,7 +158,7 @@ struct CompletionProxyModel::Index
 
     [[nodiscard]] prefix_range empty_prefix() const noexcept
     {
-        return {.lo = 0, .hi = SA.size(), .m = 0, .prefix = {}};
+        return {{.lo = 0, .hi = SA.size()}, 0, {}};
     }
 
     [[nodiscard]] prefix_range extend_prefix(prefix_range p, char8_t c) const noexcept
@@ -434,23 +438,23 @@ struct CompletionProxyModel::Index
     }
 
     // http://www.cs.yale.edu/homes/aspnes/classes/223/notes.html#MSB_radix_sort
-    void sort_suffixes(std::span<int> prefixes, int k)
+    void sort_suffixes(std::span<int> suffixes, int k)
     {
         auto txt = std::u8string_view(text);
 
-        while (prefixes.size() > 1) {
+        while (suffixes.size() > 1) {
 //             if (size <= 1024) { // 156 ms
 //             if (size <= 512) { // 148 ms
 //             if (size <= 256) { // 141 ms
 //             if (size <= 128) { // 135 ms
-            if (prefixes.size() <= 64) { // 132 ms
+            if (suffixes.size() <= 64) { // 132 ms
 //             if (size <= 32) { // 142 ms
-                std::ranges::sort(prefixes, [txt, k](int l, int r){return txt.substr(l + k) < txt.substr(r + k);});
+                std::ranges::sort(suffixes, [txt, k](int l, int r){return txt.substr(l + k) < txt.substr(r + k);});
                 return;
             }
 
             uint32_t count[256] = {};
-            std::ranges::for_each(prefixes, [&](int x){count[txt[x + k]] += 1;});
+            std::ranges::for_each(suffixes, [&](int x){count[txt[x + k]] += 1;});
             const char8_t most_common_char = std::max_element(count + 1, std::end(count)) - count;
 
             if (count[most_common_char] == 0) {
@@ -458,7 +462,7 @@ struct CompletionProxyModel::Index
                 return;
             }
 
-            if (count[most_common_char] < prefixes.size()) {
+            if (count[most_common_char] < suffixes.size()) {
                 uint32_t bucket[256];
                 uint32_t top[256];
 
@@ -469,13 +473,13 @@ struct CompletionProxyModel::Index
 
                 for (uint32_t i = 0; i < 256; ++i) {
                     while (top[i] < bucket[i] + count[i]) {
-                        auto ch = txt[prefixes[top[i]] + k];
+                        auto ch = txt[suffixes[top[i]] + k];
                         if (ch == i) {
                             // element already in its bucket, just advance top
                             ++top[i];
                         } else {
                             // swap with top char of bucket for ch
-                            std::swap(prefixes[top[i]], prefixes[top[ch]]);
+                            std::swap(suffixes[top[i]], suffixes[top[ch]]);
                             ++top[ch];
                         }
                     }
@@ -486,12 +490,12 @@ struct CompletionProxyModel::Index
                 // reduces stack depth to O(log n)
                 for(uint32_t i = 1; i < 256; ++i) {
                     if (i != most_common_char and count[i] != 0) {
-                        sort_suffixes(prefixes.subspan(bucket[i], count[i]), k + 1);
+                        sort_suffixes(suffixes.subspan(bucket[i], count[i]), k + 1);
                     }
                 }
 
                 // hobo-tail-recursion for most_common_char bucket
-                prefixes = prefixes.subspan(bucket[most_common_char], count[most_common_char]);
+                suffixes = suffixes.subspan(bucket[most_common_char], count[most_common_char]);
                 k = k + 1;
             } else { // count[most_common_char] == size
                 // whole subarray has most_common_char at position k, tail-recurse whole subarray
