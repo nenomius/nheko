@@ -132,29 +132,17 @@ struct CompletionProxyModel::Index
 //         std::iota(SA.begin(), SA.end(), 0);
         SA.reserve(text.size());
         for (std::size_t i = 0; i < text.size(); ++i) {
-            if (not utf8_is_trail_byte(text[i])) {
+            if (text[i] != u8'\0' and not utf8_is_trail_byte(text[i])) {
                 SA.push_back(i);
             }
         }
 
         sort_suffixes(SA, 0);
 
-        constexpr auto placeholder = -1;
-        invSA.resize(text.size(), placeholder);
+        invSA.resize(text.size(), -1);
         for (int i = 0, I = SA.size(); i < I; ++i) {
             invSA[SA[i]] = i;
         }
-
-        // pruning SA from unwanted prefixes creates holes in inverse SA,
-        // fill those with pointers to nearest from left prefix starting position
-//         int last_prefix = text.size();
-//         for (auto &x: invSA) {
-//             if (x == placeholder) {
-//                 x = last_prefix;
-//             } else {
-//                 last_prefix = x;
-//             }
-//         }
     }
 
     [[nodiscard]] int item_at(int text_pos) const noexcept
@@ -255,6 +243,9 @@ struct CompletionProxyModel::Index
 
     std::vector<result_item> search(std::u8string_view pattern, std::size_t max_edits)
     {
+        // Approximate String Matching Using Compressed Suffix Arrays
+        // DOI: 10.1007/978-3-540-27801-6_33
+
         nhlog::ui()->flush_on(spdlog::level::trace);
 //         fmt::print(stderr, "index: search('{}', {})\n", std::string_view(reinterpret_cast<const char*>(pattern.data()), pattern.size()), max_distance);
 
@@ -275,6 +266,7 @@ struct CompletionProxyModel::Index
 
             if (auto r = concat_prefix(p, F[i]); not r.empty()) {
 //                 fmt::print(stderr, "index:     report: {} . {} => {}", to_string(p), to_string(F[i]), to_string(r));
+                // TODO figure out result deduplication part from paper
                 results.push_back({r, edits});
             }
 
@@ -417,6 +409,7 @@ struct CompletionProxyModel::Index
         const auto t3     = std::chrono::steady_clock::now();
 
         // sort final results descending by weight, then ascending by prefix_id
+        // TODO add static item weights to mix in ranking function
         auto sort_key = [&, this](int i){return std::pair(256 - weights[i], invSA[item_starts[i]]);};
         std::ranges::sort(items, std::less{}, sort_key);
 
