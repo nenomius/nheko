@@ -678,11 +678,13 @@ else()
 	endif()
 endif()
 
-target_include_directories(nheko PRIVATE src includes third_party/blurhash third_party/cpp-httplib-0.5.12)
+target_include_directories(nheko PRIVATE src includes third_party/blurhash third_party/cpp-httplib-0.5.12 third_party/libsais-2.7.1/src)
 set(THIRD_PARTY_SRC_FILES
 	third_party/blurhash/blurhash.cpp
 	third_party/blurhash/blurhash.hpp
 	third_party/cpp-httplib-0.5.12/httplib.h
+	third_party/libsais-2.7.1/src/libsais16.c
+	third_party/libsais-2.7.1/src/libsais16.h
 	)
 target_sources(nheko PRIVATE ${THIRD_PARTY_SRC_FILES})
 
