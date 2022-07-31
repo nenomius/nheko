@@ -12,6 +12,8 @@
 #include "Logging.h"
 #include "Utils.h"
 
+#include "libsais16.h"
+
 #include <optional>
 #include <queue>
 #include <span>
@@ -132,8 +134,6 @@ struct CompletionProxyModel::Index
     {
         item_starts.push_back(text.size());
 
-//         SA.resize(text.size());
-//         std::iota(SA.begin(), SA.end(), 0);
         SA.reserve(text.size());
         for (std::size_t i = 0; i < text.size(); ++i) {
             if (text[i] != u8'\0' and not utf8_is_trail_byte(text[i])) {
@@ -217,6 +217,8 @@ struct CompletionProxyModel::Index
             return [this, k = k + k_](std::size_t i){return text[SA[i] + k];};
         };
 
+        p.lo = *std::ranges::upper_bound(p, u8'\0', std::less{}, next_byte(0));
+
         if (p.empty()) {
             return {p, -1};
         }
@@ -261,15 +263,17 @@ struct CompletionProxyModel::Index
 
         auto results = std::vector<result_item>{};
 
+        enum class edit {nop, ins, del, rep, swap};
+
         int ilevel = 0;
-        auto kapproximate = [&](auto kapproximate, prefix_range p, std::size_t i, std::size_t edits)
+        auto kapproximate = [&](auto kapproximate, prefix_range p, std::size_t i, std::size_t edits, edit last_op)
         {
             ilevel += 1;
             const auto indent = std::string(ilevel, '=');
-//             fmt::print(stderr, "index: {}kapproximate({}, {}, {})\n", indent, to_string(p), i, edits);
+            fmt::print(stderr, "index: {}kapproximate({}, {}, {})\n", indent, to_string(p), i, edits);
 
             if (auto r = concat_prefix(p, F[i]); not r.empty()) {
-//                 fmt::print(stderr, "index:     report: {} . {} => {}", to_string(p), to_string(F[i]), to_string(r));
+                fmt::print(stderr, "index:     report: {} . {} => {}\n", to_string(p), to_string(F[i]), to_string(r));
                 // TODO figure out result deduplication part from paper
                 results.push_back({r, edits});
             }
@@ -281,20 +285,19 @@ struct CompletionProxyModel::Index
 
             // TODO adjacent character swaps
             for (auto j = i; j < pattern.size() and not p.empty();) {
-//                 fmt::print(stderr, "index: {}    j:{} p:{}\n", indent, j, to_string(p));
+                fmt::print(stderr, "index: {}    j:{} p:{}\n", indent, j, to_string(p));
                 const auto [p_char, l] = utf8_decode(&pattern[j]);
                 const auto j_next = j + l;
 
                 // deletion at j
-                if (j_next < pattern.size()) {
-                    kapproximate(kapproximate, p, j_next, edits + 1);
+                // dont do del-ins, or ins-del since that pair is same as replace, but in 2 edits
+                if (last_op != edit::ins) {
+                    kapproximate(kapproximate, p, j_next, edits + 1, edit::del);
                 }
-
-                const auto p_next = extend_prefix(p, pattern.substr(j, l));
 
                 assert(not p.empty());
                 for (auto [s, c] = first_subrange_utf8(p); s.lo != p.hi; std::tie(s, c) = next_subrange_utf8(p, s)) {
-//                     fmt::print(stderr, "index: {}  subrange {} {} of {}\n", indent, to_string(s), uint32_t(c), to_string(p));
+                    fmt::print(stderr, "index: {}  subrange {} {} of {}\n", indent, to_string(s), uint32_t(c), to_string(p));
 
                     // skip null byte, thats for delimiting only
                     // also skip code point matching pattern since using that is not an edit
@@ -303,16 +306,31 @@ struct CompletionProxyModel::Index
                     }
 
                     // replacemen at j
-                    if (j_next < pattern.size()) {
-                        kapproximate(kapproximate, s, j_next, edits + 1);
-                    }
+                    kapproximate(kapproximate, s, j_next, edits + 1, edit::rep);
 
                     // insertion at j
-                    kapproximate(kapproximate, s, j, edits + 1);
+                    if (last_op != edit::del) {
+                        kapproximate(kapproximate, s, j, edits + 1, edit::ins);
+                    }
                 }
 
                 j = j_next;
-                p = p_next;
+                p = extend_prefix(p, pattern.substr(j, l));
+            }
+
+            // try also inserions after patterns end
+            if (last_op != edit::del) {
+                for (auto [s, c] = first_subrange_utf8(p); s.lo != p.hi; std::tie(s, c) = next_subrange_utf8(p, s)) {
+                    fmt::print(stderr, "index: {}  subrange {} {} of {}\n", indent, to_string(s), uint32_t(c), to_string(p));
+
+                    // skip null byte, thats for delimiting only
+                    if (c == U'\0') {
+                        continue;
+                    }
+
+                    // insertion at j
+                    kapproximate(kapproximate, s, pattern.size(), edits + 1, edit::ins);
+                }
             }
 
             ilevel -= 1;
@@ -321,7 +339,7 @@ struct CompletionProxyModel::Index
         if (pattern.empty()) {
             results.push_back({empty_prefix(), 0});
         } else {
-            kapproximate(kapproximate, empty_prefix(), 0, 0);
+            kapproximate(kapproximate, empty_prefix(), 0, 0, edit::nop);
         }
 
         return results;
@@ -419,13 +437,13 @@ struct CompletionProxyModel::Index
 
         const auto t4     = std::chrono::steady_clock::now();
 
-        fmt::print(stderr, "index: RESULTS:\n");
-        for (auto item: items) {
-            const auto item_text_pos = item_starts[item];
-            auto first = std::string_view(reinterpret_cast<const char*>(text.data() + item_text_pos));
-            auto second = std::string_view(first.end() + 1);
-            fmt::print(stderr, "index:     {} w:{} '{}' '{}'\n", item, weights[item], first, second);
-        }
+        fmt::print(stderr, "index: RESULTS {}:\n", items.size());
+//         for (auto item: items) {
+//             const auto item_text_pos = item_starts[item];
+//             auto first = std::string_view(reinterpret_cast<const char*>(text.data() + item_text_pos));
+//             auto second = std::string_view(first.end() + 1);
+//             fmt::print(stderr, "index:     {} w:{} '{}' '{}'\n", item, weights[item], first, second);
+//         }
 
         using fmilli = std::chrono::duration<double, std::milli>;
         fmt::print(stderr, "index:     search: {} ms\n", fmilli(t1 - t0).count());
@@ -563,6 +581,54 @@ CompletionProxyModel::CompletionProxyModel(QAbstractItemModel *model,
         fmt::print(stderr, "CompletionProxyModel: full_text size: {}\n", index_->text.size());
     }
 
+    {
+        QString text;
+        const auto start_at = std::chrono::steady_clock::now();
+
+        const auto row_count = sourceModel()->rowCount();
+
+        for (int i = 0; i < row_count; i++) {
+            auto string1 = sourceModel()
+                            ->data(sourceModel()->index(i, 0), CompletionModel::SearchRole)
+                            .toString()
+                            .toLower();
+
+            auto string2 = sourceModel()
+                            ->data(sourceModel()->index(i, 0), CompletionModel::SearchRole2)
+                            .toString()
+                            .toLower();
+
+            text.append(string1);
+            text.push_back('\0');
+            text.append(string2);
+            text.push_back('\0');
+        }
+
+        const auto concat_at     = std::chrono::steady_clock::now();
+
+        /* Makes suffix array p of x. x becomes inverse of p. p and x are both of size
+        n+1. Contents of x[0...n-1] are integers in the range l...k-1. Original
+        contents of x[n] is disregarded, the n-th symbol being regarded as
+        end-of-string smaller than all other symbols.*/
+        auto SA = std::vector<int>{};
+
+        SA.resize(text.size());
+        auto ec = libsais16(text.utf16(), SA.data(), text.size(), 0, nullptr);
+
+        auto invSA = std::vector<int>{};
+        invSA.resize(text.size(), -1);
+        for (int i = 0, I = SA.size(); i < I; ++i) {
+            invSA[SA[i]] = i;
+        }
+
+        const auto build_at     = std::chrono::steady_clock::now();
+
+        using fmilli = std::chrono::duration<double, std::milli>;
+        fmt::print(stderr, "CompletionProxyModel: libsais: concat full text: {} ms\n", fmilli(concat_at - start_at).count());
+        fmt::print(stderr, "CompletionProxyModel: libsais: build SA (ec:{}): {} ms\n", ec, fmilli(build_at - concat_at).count());
+        fmt::print(stderr, "CompletionProxyModel: libsais: total: {} ms\n", fmilli(build_at - start_at).count());
+    }
+
     // initialize default mapping
     mapping.resize(std::min(max_completions_, static_cast<size_t>(model->rowCount())));
     std::iota(mapping.begin(), mapping.end(), 0);
@@ -572,6 +638,9 @@ CompletionProxyModel::CompletionProxyModel(QAbstractItemModel *model,
       &CompletionProxyModel::newSearchString,
       this,
       [this](QString s) {
+          if (not s.isEmpty() and QStringLiteral("#@~:").contains(s.front())) {
+              s = s.mid(1);
+          }
           searchString_ = s.toLower();
           invalidate();
       },
